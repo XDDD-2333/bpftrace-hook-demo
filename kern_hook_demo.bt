@@ -1,0 +1,317 @@
+#!/usr/bin/env bpftrace
+/*
+ * This is a bpftrace version of the bcc tool of the same name.
+ *
+ * Copyright 2018 Netflix, Inc.
+ * Licensed under the Apache License, Version 2.0 (the "License")
+ *
+ * 
+ * bpftrace -lv *xxx*    模糊查找相关hook点、查看args参数
+ * 
+ */
+
+// #include <linux/kernel.h>
+#include <linux/cred.h>
+#include <linux/module.h>
+#include <linux/fs.h>
+#include <linux/bpf.h>
+
+BEGIN
+{
+	printf("kern_hook_demo start ... Hit Ctrl-C to end.\n");
+	printf("============= self tid:%d  =================== \n",tid);
+	@self_tid = tid;
+}
+
+// tracepoint/syscalls/sys_enter_execve
+tracepoint:syscalls:sys_enter_execve
+{
+/*
+	触发较多，测试时可添加一些过滤条件or直接注释	
+ */
+	$task = (struct task_struct *)curtask;
+	time("%H:%M:%S ");
+	printf("msg = “comm=%s tid=%d probe=%s uid=%u arg->filename=%s” \n", comm, tid ,probe, (uint32)$task->real_cred->uid.val, str(args->filename));
+}
+
+// tracepoint/syscalls/sys_enter_execveat
+tracepoint:syscalls:sys_enter_execveat
+{
+/*
+	触发较多，测试时可添加一些过滤条件or直接注释	
+ */
+	$task = (struct task_struct *)curtask;
+	time("%H:%M:%S ");
+	printf("msg = “comm=%s tid=%d probe=%s uid=%u arg->filename=%s” \n", comm, tid ,probe, (uint32)$task->real_cred->uid.val, str(args->filename));
+}
+
+tracepoint:syscalls:sys_enter_memfd_create
+{
+/*
+	uname 没有参数，参考尝试从exe-name中获取
+	获取全路径 task_struct->mm->exe_file->f_path： 
+		但是此方法有限制，内核必须启用PROC_FS。而一般发行版都是去掉这个选项的。因此不重新编译内核基本无法使用，否则机器就要dump。
+		目前在ubuntu2004上正常运行
+ */	
+	$task = (struct task_struct *)curtask;
+	time("%H:%M:%S ");
+	printf("msg = “comm=%s tid=%d probe=%s uid=%u arg->uname=%s” \n", comm, tid ,probe, (uint32)$task->real_cred->uid.val, str(args->uname));
+}
+
+tracepoint:syscalls:sys_enter_prctl
+{
+/*
+	https://man7.org/linux/man-pages/man2/prctl.2.html
+ */
+	$task = (struct task_struct *)curtask;
+	time("%H:%M:%S ");
+	printf("msg = “comm=%s tid=%d probe=%s uid=%u arg->option=%d” \n", comm, tid ,probe, (uint32)$task->real_cred->uid.val, args->option);
+}
+
+tracepoint:syscalls:sys_enter_ptrace
+{
+/*
+	
+ */
+	$task = (struct task_struct *)curtask;
+	time("%H:%M:%S ");
+	printf("msg = “comm=%s tid=%d probe=%s uid=%u arg->pid=%ld arg->request=%ld arg->addr=%lu” \n", comm, tid ,probe, (uint32)$task->real_cred->uid.val, args->pid, args->request, args->addr);
+}
+
+// argX：arg0 ~ arg5 
+kprobe:commit_creds
+{
+/*
+	uid从非0变为0 。old_uid不为，同时0new-uid为0
+	运行较多，测试时可添加一些过滤条件
+	int commit_creds(struct cred *new)
+	const struct cred *old = task->real_cred;
+ */
+	$new = ((struct cred *) arg0);
+	$task = (struct task_struct *)curtask;
+	$old = $task->real_cred;
+	$new_uid = (uint32)$new->uid.val;
+	$old_uid = (uint32)$old->uid.val;
+    // $pidns = $task->nsproxy->pid_ns_for_children->ns.inum;
+    // $cname = $task->nsproxy->uts_ns->name.nodename;
+	if ($new_uid == 0 && $old_uid != 0)
+	{
+		time("%H:%M:%S ");
+		printf("msg = “comm=%s tid=%d probe=%s old-uid=%u new-uid=%u ” \n", comm, tid ,probe, $old_uid, $new_uid);
+	}	
+}
+
+kprobe:do_init_module
+{
+/*
+	static noinline int do_init_module(struct module *mod)
+ */
+	$mod = ((struct module *) arg0);
+	$task = (struct task_struct *)curtask;
+	$name = $mod->name;
+	time("%H:%M:%S ");
+	printf("msg = “comm=%s tid=%d probe=%s uid=%u name=%s” \n", comm, tid ,probe, (uint32)$task->real_cred->uid.val, $name);
+}
+
+kprobe:security_kernel_read_file
+{
+/*
+	int security_kernel_read_file(struct file *file, enum kernel_read_file_id id, bool contents);
+	bpftrace方法 path($file->f_path) 仅kfun可用
+	文件名：file->f_path.dentry->d_iname
+ */
+	$file = ((struct file *) arg0);
+	$task = (struct task_struct *)curtask;
+	time("%H:%M:%S ");
+	printf("msg = “comm=%s tid=%d probe=%s uid=%u args-filename=%s” \n", comm, tid ,probe, (uint32)$task->real_cred->uid.val, str((int8 *)$file->f_path.dentry->d_iname) );
+}
+
+kprobe:security_inode_create
+{
+/*
+	int security_inode_create(struct inode *dir, struct dentry *dentry, umode_t mode);
+ */
+	// $dir = ((struct inode *) arg0);
+	$task = (struct task_struct *)curtask;
+	$dentry = ((struct dentry *) arg1);
+	$exe_file = (struct file *)$task->mm->exe_file;
+	time("%H:%M:%S ");
+	printf("msg = “comm=%s tid=%d probe=%s uid=%u exe_file=%s args-dentry=%s” \n", comm, tid ,probe, (uint32)$task->real_cred->uid.val, str((int8 *)$exe_file->f_path.dentry->d_iname), str((int8 *)$dentry->d_iname) );
+}
+
+kprobe:security_sb_mount
+{
+/*
+	int security_sb_mount(const char *dev_name, const struct path *path,
+		      const char *type, unsigned long flags, void *data);
+ */
+	$dev_name = ((int8 *) arg0);
+	$path = ((struct path *) arg1);
+	// $type = ((int8 *) arg2);
+	// $flags = ((uint64) arg3);
+
+	$task = (struct task_struct *)curtask;
+	$exe_file = (struct file *)$task->mm->exe_file;
+
+	time("%H:%M:%S ");
+	printf("msg = “comm=%s tid=%d probe=%s uid=%u exe_file=%s args->dev_name=%s args->path-name=%s ” \n", comm, tid ,probe, (uint32)$task->real_cred->uid.val, str((int8 *)$exe_file->f_path.dentry->d_iname), str($dev_name), str((int8 *)$path->dentry->d_iname) );
+}
+
+kprobe:security_inode_rename
+{
+/*
+	int security_inode_rename(struct inode *old_dir, struct dentry *old_dentry,
+			  struct inode *new_dir, struct dentry *new_dentry,
+ */	
+	$old_dentry = ((struct dentry *) arg1);
+	$new_dentry = ((struct dentry *) arg3);
+
+	$task = (struct task_struct *)curtask;
+	$exe_file = (struct file *)$task->mm->exe_file;
+
+	time("%H:%M:%S ");
+	printf("msg = “comm=%s tid=%d probe=%s uid=%u exe_file=%s args->old_dentry-name=%s args->new_dentry-name=%s ” \n", comm, tid ,probe, (uint32)$task->real_cred->uid.val, str((int8 *)$exe_file->f_path.dentry->d_iname), 
+		str((int8 *)$old_dentry->d_iname) , str((int8 *)$new_dentry->d_iname) ) ;
+}
+
+kprobe:security_inode_link
+{
+/*
+	int security_inode_link(struct dentry *old_dentry, struct inode *dir,
+			 struct dentry *new_dentry);
+ */	
+	$old_dentry = ((struct dentry *) arg0);
+	$new_dentry = ((struct dentry *) arg2);
+
+	$task = (struct task_struct *)curtask;
+	$exe_file = (struct file *)$task->mm->exe_file;
+
+	time("%H:%M:%S ");
+	printf("msg = “comm=%s tid=%d probe=%s uid=%u exe_file=%s args->old_dentry-name=%s args->new_dentry-name=%s ” \n", comm, tid ,probe, (uint32)$task->real_cred->uid.val, str((int8 *)$exe_file->f_path.dentry->d_iname), 
+		str((int8 *)$old_dentry->d_iname) , str((int8 *)$new_dentry->d_iname) ) ;
+}
+
+/** 
+ * kprobe/call_usermodehelper
+ * // int call_usermodehelper(const char *path, char **argv, char **envp, int wait)
+ * call_usermodehelper() - prepare and start a usermode application
+ * @path: path to usermode executable
+ * @argv: arg vector for process
+ * @envp: environment for process
+ * @wait: wait for the application to finish and return status.
+ *        when UMH_NO_WAIT don't wait at all, but you get no useful error back
+ *        when the program couldn't be exec'ed. This makes it safe to call
+ *        from interrupt context.
+ *
+ * This function is the equivalent to use call_usermodehelper_setup() and
+ * call_usermodehelper_exec().
+ */
+kprobe:call_usermodehelper
+{
+/*
+	int call_usermodehelper(const char *path, char **argv, char **envp, int wait)
+ */	
+	$path = ((int8 *) arg0);
+
+	$task = (struct task_struct *)curtask;
+	$exe_file = (struct file *)$task->mm->exe_file;
+
+	time("%H:%M:%S ");
+	printf("msg = “comm=%s tid=%d probe=%s uid=%u exe_file=%s args->file-name=%s ” \n", comm, tid ,probe, (uint32)$task->real_cred->uid.val, str((int8 *)$exe_file->f_path.dentry->d_iname), 
+		str($path) ) ;
+}
+
+// eBPF backdoor(behavior) detection
+// https://github.com/kris-nova/boopkit
+// eBPF-based rootkit(detection), upload an eBPF program's behavior
+// Related kernel functions are here:
+// security_bpf(__sys_bpf from SYSCALL, very early stage)
+// bpf_check (verifier) => https://elixir.bootlin.com/linux/v6.0/source/kernel/bpf/verifier.c#L15128
+// security_bpf_prog(within bpf_prog_new_fd, after bpf_check)
+// 
+// According to the https://github.com/Gui774ume/ebpfkit-monitor, I simplify this by following:
+// 1. kprobe/sys_bpf for initialization
+// 2. security_bpf, only recording cmd like
+//    BPF_PROG_LOAD/BPF_PROG_ATTACH/BPF_BTF_LOAD/BPF_RAW_TRACEPOINT_OPEN, but we won't do a filter
+//    for now, since we also hook security_bpf_prog
+// 3. security_bpf_prog, get the context information about the program
+// 4. kpretprobe/sys_bpf for popping the result to userspace
+//
+// Event more, we could block the way to initialize, override the return by
+// bpf_override_return(ctx, -EPERM);
+// to block. But, be really careful about this action. And, like anti-rootkit part
+// we should also add behavior detection instead of doing stack trace...
+// 
+// Reference:
+// https://i.blackhat.com/USA21/Wednesday-Handouts/us-21-With-Friends-Like-EBPF-Who-Needs-Enemies.pdf
+// TODO: in ubuntu, sometimes hook failed
+kprobe:security_bpf
+{
+/*
+	int security_bpf(int cmd, union bpf_attr *attr, unsigned int size);
+ */	
+	$cmd = ((int32) arg0);
+
+	$task = (struct task_struct *)curtask;
+	$exe_file = (struct file *)$task->mm->exe_file;
+
+	if ($cmd == (int32)BPF_PROG_LOAD)
+	{
+		$attr = (union bpf_attr *)arg1;
+		if ($attr != 0){
+			$name = $attr->prog_name;
+			$type = (uint32)$attr->prog_type;
+			time("%H:%M:%S ");
+			printf("msg = “comm=%s tid=%d probe=%s uid=%u exe_file=%s bpf-prog_name=%s bpf-prog_type=%d” \n", comm, tid ,probe, (uint32)$task->real_cred->uid.val, str((int8 *)$exe_file->f_path.dentry->d_iname), 
+				$name, $type ) ;
+		}
+		
+	}
+}
+
+
+/* fops checks
+ * https://github.com/chriskaliX/Hades/blob/fdfbcabb68d48262b09e8bfc03bf44f2bdcf5c9a/plugins/ebpfdriver/kern/include/hades_rootkit.h
+ * In tracee, security_file_permission is hooked for file
+ * file_operations iterater detection, but in tyton(or Elkeid)
+ * only detect the /proc dir, which may be evaded. There are
+ * more than one way to hide from the proc file, set SUSPEND
+ * flag just like Reptile do can also evade detection like
+ * this one. PAY ATTENTION TO list kernel
+ * 
+ * Reference:
+ * https://vxug.fakedoma.in/papers/h2hc/H2HC%20-%20Matveychikov%20&%20f0rb1dd3%20-%20Kernel%20Rootkits.pdf
+ * tracee: https://blog.aquasec.com/detect-drovorub-kernel-rootkit-attack-tracee
+ * rootkit-demo: https://github.com/Unik-lif/rootkit-hide
+ * evasion: https://blog.csdn.net/dog250/article/details/105939822
+ *
+ * Warning: This function is under full test, PERFORMANCE IS UNKNOWN
+ * from tracee. filldir
+ * 
+ * 
+ * 
+ */
+// kprobe:security_file_permission
+// {
+// /*
+// 	int security_file_permission(struct file *file, int mask);
+//  */	
+// 	$file = ((struct file *) arg0);
+
+// 	$task = (struct task_struct *)curtask;
+// 	$exe_file = (struct file *)$task->mm->exe_file;
+
+// 	time("%H:%M:%S ");
+// 	printf("msg = “comm=%s tid=%d probe=%s uid=%u exe_file=%s args->file-name=%s ” \n", comm, tid ,probe, (uint32)$task->real_cred->uid.val, str((int8 *)$exe_file->f_path.dentry->d_iname), 
+// 		str((int8 *)$file->f_path.dentry->d_iname) ) ;
+// }
+
+/*
+// ============================ network TODO============================
+
+// kprobe/security_socket_connect
+
+// kprobe/security_socket_bind
+
+// k(ret)probe/udp_recvmsg
+*/
